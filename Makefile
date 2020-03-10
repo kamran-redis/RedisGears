@@ -41,6 +41,7 @@ make all        # build all libraries and packages
 make test          # run tests
   DEBUG=1          # run tests with Valgrind
   TEST=test        # run specific `test` with Python debugger
+  SHARDS=0         # do not test with multiple shards
   GDB=1            # (with TEST=...) run with GDB
   COV=1            # perform coverage analysis
   VALGRIND|VG=1    # test with Valgrind (implies DEBUG=1)
@@ -370,7 +371,7 @@ ifeq ($(DEBUG),1)
 else ifneq ($(TEST),)
 	@set -e; cd pytest; PYDEBUG=1 RLTest --test $(TEST) $(RLTEST_GDB) -s --module $(abspath $(TARGET))
 else
-	$(SHOW)set -e; cd pytest; ./run_tests.sh
+	$(SHOW)set -e; cd pytest; SHARDS=$(SHARDS) ./run_tests.sh
 endif
 	$(COVERAGE_COLLECT_REPORT)
 
