@@ -16,6 +16,11 @@ commands:
       - run:
           name: Submodule checkout
           command: git submodule update --init --recursive
+      - save_cache:
+          paths:
+            - deps
+            - /usr/local
+          key: build-dependencies-{{ $CIRCLE_SHA1 }}
       - run:
           name: System setup
           command: BREW_NO_UPDATE=1 python system-setup.py
@@ -97,9 +102,14 @@ jobs:
       - image: redisfab/rmbuilder:5.0.7-x64-buster
     steps:
       - checkout
-      - run:
-          name: Submodule checkout
-          command: git submodule update --init --recursive
+      - restore_cache:
+          keys:
+          - build-dependencies-{{ checksum "get_deps.sh" }}
+          # fallback to using the latest cache if no exact match is found
+          - build-dependencies-
+      # - run:
+      #     name: Submodule checkout
+      #     command: git submodule update --init --recursive
       - run:
           name: Install dependencies
           command: |
@@ -214,7 +224,7 @@ workflows:
               only: /.*/
       - coverage:
           requires:
-            - build
+            - linux-debian
           filters:
             branches:
               only: /.*/
