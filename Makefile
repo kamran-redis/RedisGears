@@ -4,17 +4,30 @@ include deps/readies/mk/main
 
 BINDIR=$(BINROOT)/$(SRCDIR)
 
+ifneq ($(VG),)
+VALGRIND=$(VG)
+endif
+
+ifeq ($(VALGRIND),1)
+DEBUG ?= 1
+endif
+
+ifeq ($(COV),1)
+DEBUG ?= 1
+endif
+
 #----------------------------------------------------------------------------------------------
 
 define HELP
 make setup      # install packages required for build
-make fetch      # download and prepare dependant modules (i.e., python, libevent)
+make fetch      # download and prepare dependant modules (i.e., cpython, libevent)
 
 make build
   DEBUG=1       # build debug variant
-  VARIANT=name
+  VARIANT=name  # build variant `name`
   WITHPYTHON=0  # build without embedded Python interpreter
   DEPS=1        # also build dependant modules
+  COV=1         # build for coverage analysis (implies DEBUG=1)
 make clean      # remove binary files
   ALL=1         # remove binary directories
   DEPS=1        # also clean dependant modules
@@ -29,6 +42,10 @@ make test          # run tests
   DEBUG=1          # run tests with Valgrind
   TEST=test        # run specific `test` with Python debugger
   GDB=1            # (with TEST=...) run with GDB
+  COV=1            # perform coverage analysis
+  VALGRIND|VG=1    # test with Valgrind (implies DEBUG=1)
+  CALLGRIND|CG=1   # test with Callgrind (implies DEBUG=1)
+make cov-upload    # upload coverage data to codecov.io (requires CODECOV_TOKEN)
 
 make pack          # build packages (ramp & dependencies)
 make ramp_pack     # only build ramp package
@@ -99,7 +116,8 @@ CC_FLAGS += \
 	-include $(SRCDIR)/common.h \
 	-I$(SRCDIR) -Iinclude -I$(BINDIR) -Ideps -I. \
 	-DREDISGEARS_GIT_SHA=\"$(GIT_SHA)\" \
-	-DREDISMODULE_EXPERIMENTAL_API
+	-DREDISMODULE_EXPERIMENTAL_API \
+	$(CC_FLAGS.coverage)
 
 TARGET=$(BINROOT)/redisgears.so
 
@@ -113,6 +131,8 @@ endif
 ifeq ($(OS),macosx)
 LD_FLAGS += -undefined dynamic_lookup
 endif
+
+LD_FLAGS += $(LD_FLAGS.coverage)
 
 #----------------------------------------------------------------------------------------------
 
@@ -344,6 +364,7 @@ RLTEST_GDB=-i
 endif
 
 test: __sep
+	$(COVERAGE_RESET)
 ifeq ($(DEBUG),1)
 	$(SHOW)set -e; cd pytest; VALGRIND=1 ./run_tests.sh
 else ifneq ($(TEST),)
@@ -351,5 +372,12 @@ else ifneq ($(TEST),)
 else
 	$(SHOW)set -e; cd pytest; ./run_tests.sh
 endif
+	$(COVERAGE_COLLECT_REPORT)
+
+valgrind:
+	$(SHOW)$(ROOT)/test/valgrind.sh $(abspath $(TARGET))
+
+callgrind:
+	$(SHOW)CALLGRIND=1 $(ROOT)/build/scripts/valgrind.sh $(abspath $(TARGET))
 
 #----------------------------------------------------------------------------------------------
