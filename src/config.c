@@ -49,8 +49,10 @@ typedef struct RedisGears_Config{
     ConfigVal pythonAttemptTraceback;
     ConfigVal createVenv;
     ConfigVal executionThreads;
+    ConfigVal executionMaxIdleTime;
     ConfigVal dependenciesUrl;
     ConfigVal dependenciesSha256;
+    ConfigVal venvWorkingPath;
 }RedisGears_Config;
 
 typedef const ConfigVal* (*GetValueCallback)();
@@ -146,6 +148,21 @@ static bool ConfigVal_DependenciesSha256Set(ArgsIterator* iter){
     return true;
 }
 
+static const ConfigVal* ConfigVal_VenvWorkingPathGet(){
+    return &DefaultGearsConfig.venvWorkingPath;
+}
+
+static bool ConfigVal_VenvWorkingPathSet(ArgsIterator* iter){
+    RedisModuleString* val = ArgsIterator_Next(iter);
+    if(!val){
+        return false;
+    }
+    RG_FREE(DefaultGearsConfig.venvWorkingPath.val.str);
+    const char* valStr = RedisModule_StringPtrLen(val, NULL);
+    DefaultGearsConfig.venvWorkingPath.val.str = RG_STRDUP(valStr);
+    return true;
+}
+
 static const ConfigVal* ConfigVal_PythonAttemptTracebackGet(){
 	return &DefaultGearsConfig.pythonAttemptTraceback;
 }
@@ -200,6 +217,26 @@ static bool ConfigVal_ExecutionThreadsSet(ArgsIterator* iter){
     }
 }
 
+static const ConfigVal* ConfigVal_ExecutionMaxIdleTimeGet(){
+    return &DefaultGearsConfig.executionMaxIdleTime;
+}
+
+static bool ConfigVal_ExecutionMaxIdleTimeSet(ArgsIterator* iter){
+    RedisModuleString* val = ArgsIterator_Next(iter);
+    if(!val) return false;
+    long long n;
+
+    if (RedisModule_StringToLongLong(val, &n) == REDISMODULE_OK) {
+        if(n <= 0){
+            return false;
+        }
+        DefaultGearsConfig.executionMaxIdleTime.val.longVal = n;
+        return true;
+    } else {
+        return false;
+    }
+}
+
 static Gears_dict* Gears_ExtraConfig = NULL;
 
 static Gears_ConfigVal Gears_ConfigVals[] = {
@@ -246,10 +283,22 @@ static Gears_ConfigVal Gears_ConfigVals[] = {
         .configurableAtRunTime = false,
     },
     {
+        .name = "VenvWorkingPath",
+        .getter = ConfigVal_VenvWorkingPathGet,
+        .setter = ConfigVal_VenvWorkingPathSet,
+        .configurableAtRunTime = false,
+    },
+    {
         .name = "ExecutionThreads",
         .getter = ConfigVal_ExecutionThreadsGet,
         .setter = ConfigVal_ExecutionThreadsSet,
         .configurableAtRunTime = false,
+    },
+    {
+        .name = "ExecutionMaxIdleTime",
+        .getter = ConfigVal_ExecutionMaxIdleTimeGet,
+        .setter = ConfigVal_ExecutionMaxIdleTimeSet,
+        .configurableAtRunTime = true,
     },
     {
         NULL,
@@ -412,6 +461,10 @@ const char* GearsConfig_GetExtraConfigVals(const char* key){
     return Gears_dictFetchValue(Gears_ExtraConfig, key);
 }
 
+const char* GearsConfig_GetVenvWorkingPath(){
+    return DefaultGearsConfig.venvWorkingPath.val.str;
+}
+
 const char* GearsConfig_GetDependenciesUrl(){
     return DefaultGearsConfig.dependenciesUrl.val.str;
 }
@@ -425,6 +478,10 @@ long long GearsConfig_CreateVenv(){
 
 long long GearsConfig_ExecutionThreads(){
     return DefaultGearsConfig.executionThreads.val.longVal;
+}
+
+long long GearsConfig_ExecutionMaxIdleTime(){
+    return DefaultGearsConfig.executionMaxIdleTime.val.longVal;
 }
 
 static void GearsConfig_Print(RedisModuleCtx* ctx){
@@ -500,6 +557,14 @@ int GearsConfig_Init(RedisModuleCtx* ctx, RedisModuleString** argv, int argc){
         .executionThreads = {
             .val.longVal = 3,
             .type = LONG,
+        },
+        .executionMaxIdleTime = {
+            .val.longVal = 5000,
+            .type = LONG,
+        },
+        .venvWorkingPath = {
+            .val.str = RG_STRDUP("/var/opt/redislabs/lib"),
+            .type = STR,
         },
     };
 

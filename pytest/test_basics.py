@@ -561,6 +561,20 @@ def testDependenciesInstallFailure(env):
                                "map(lambda x: __import__('redisgraph'))."
                                "collect().distinct().run()", 'REQUIREMENTS', 'blabla').error().contains('satisfy requirments')
 
+def testDependenciesWithRegister(env):
+    env.skipOnCluster()
+    env.expect('RG.PYEXECUTE', "GB()."
+                               "map(lambda x: __import__('redisgraph'))."
+                               "collect().distinct().register()", 'REQUIREMENTS', 'redisgraph').ok()
+
+    for _ in env.reloading_iterator():
+        res = env.cmd('RG.PYEXECUTE', "GB('ShardsIDReader')."
+                                      "map(lambda x: str(__import__('redisgraph')))."
+                                      "collect().distinct().run()")
+        env.assertEqual(len(res[0]), 1)
+        env.assertEqual(len(res[1]), 0)
+        env.assertContains("<module 'redisgraph'", res[0][0])
+
 def testAtomic(env):
     conn = getConnectionByEnv(env)
     script = '''
@@ -588,3 +602,23 @@ GB('ShardsIDReader').foreach(InifinitLoop).run()
     env.expect('RG.ABORTEXECUTION', executionId).ok()
     env.expect('RG.DROPEXECUTION', executionId).ok()
 
+def testMaxIdle():
+    env = Env(moduleArgs='ExecutionMaxIdleTime 500')
+    if env.shardsCount == 1:
+        env.skip()
+
+    conn = getConnectionByEnv(env)
+
+    longExecution = '''
+import time
+
+myHashTag = hashtag()
+
+def Loop(r):
+    if hashtag() != myHashTag:
+        # wait for 1 second only if I am not the initiator
+        time.sleep(1)
+    return 1
+GB('ShardsIDReader').map(Loop).run()
+'''
+    env.expect('RG.PYEXECUTE', longExecution).equal([['1'], ['Execution max idle reached']])

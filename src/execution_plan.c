@@ -203,6 +203,9 @@ static void ExectuionPlan_WorkerMsgSend(WorkerData* wd, WorkerMsg* msg){
 }
 
 static void ExectuionPlan_WorkerMsgFree(WorkerMsg* msg){
+    if(msg->type == ADD_RECORD_MSG && msg->addRecordWM.record){
+        RedisGears_FreeRecord(msg->addRecordWM.record);
+    }
 	RG_FREE(msg);
 }
 
@@ -341,7 +344,7 @@ static int FlatExecutionPlan_SerializeStep(FlatExecutionStep* step, Gears_Buffer
     return REDISMODULE_OK;
 }
 
-const char* FlatExecutionPlan_Serialize(FlatExecutionPlan* fep, size_t *len, char** err){
+static const char* FlatExecutionPlan_SerializeInternal(FlatExecutionPlan* fep, size_t *len, char** err){
     if(fep->serializedFep){
         // notice that this is not only an optimization,
         // when calling register on fep we call this function to serialize
@@ -355,22 +358,6 @@ const char* FlatExecutionPlan_Serialize(FlatExecutionPlan* fep, size_t *len, cha
     fep->serializedFep = Gears_BufferCreate();
     Gears_BufferWriter bw;
     Gears_BufferWriterInit(&bw, fep->serializedFep);
-
-    // Private data must serialize and deserialized first cause other
-    // stages of the deserialization process might need it.
-    if(fep->PD){
-        RedisGears_BWWriteLong(&bw, 1); // PD exists
-        RedisGears_BWWriteString(&bw, fep->PDType);
-        ArgType* type = FepPrivateDatasMgmt_GetArgType(fep->PDType);
-        assert(type);
-        if(type->serialize(fep->PD, &bw, err) != REDISMODULE_OK){
-            Gears_BufferFree(fep->serializedFep);
-            fep->serializedFep = NULL;
-            return NULL;
-        }
-    }else{
-        RedisGears_BWWriteLong(&bw, 0); // PD do exists
-    }
 
     FlatExecutionPlan_SerializeReader(fep->reader, &bw);
     RedisGears_BWWriteLong(&bw, array_len(fep->steps));
@@ -459,6 +446,35 @@ const char* FlatExecutionPlan_Serialize(FlatExecutionPlan* fep, size_t *len, cha
     return fep->serializedFep->buff;
 }
 
+int FlatExecutionPlan_Serialize(Gears_BufferWriter* bw, FlatExecutionPlan* fep, char** err){
+    // we serialize the PD of a fep each time cause it might be very big (contains file
+    // deps and we do not want to hold it in the memory all the time)
+    // Als private data must serialize and deserialized first cause other
+    // stages of the deserialization process might need it.
+    if(fep->PD){
+        RedisGears_BWWriteLong(bw, 1); // PD exists
+        RedisGears_BWWriteString(bw, fep->PDType);
+        ArgType* type = FepPrivateDatasMgmt_GetArgType(fep->PDType);
+        assert(type);
+        if(type->serialize(fep->PD, bw, err) != REDISMODULE_OK){
+            return REDISMODULE_ERR;
+        }
+    }else{
+        RedisGears_BWWriteLong(bw, 0); // PD do exists
+    }
+
+    size_t serializedFepLen;
+    const char* serializedFep = FlatExecutionPlan_SerializeInternal(fep, &serializedFepLen, err);
+
+    if(!serializedFep){
+        return REDISMODULE_ERR;
+    }
+
+    RedisGears_BWWriteBuffer(bw, serializedFep, serializedFepLen);
+
+    return REDISMODULE_OK;
+}
+
 static FlatExecutionReader* FlatExecutionPlan_DeserializeReader(Gears_BufferReader* br){
     char* readerName = RedisGears_BRReadString(br);
     FlatExecutionReader* reader = FlatExecutionPlan_NewReader(readerName);
@@ -484,7 +500,7 @@ static int FlatExecutionPlan_DeserializeStep(FlatExecutionPlan* fep, FlatExecuti
     return REDISMODULE_OK;
 }
 
-FlatExecutionPlan* FlatExecutionPlan_Deserialize(const char* data, size_t dataLen, char** err){
+static int FlatExecutionPlan_DeserializeInternal(FlatExecutionPlan* ret, const char* data, size_t dataLen, char** err){
     Gears_Buffer buff = {
             .buff = (char*)data,
             .size = dataLen,
@@ -492,18 +508,6 @@ FlatExecutionPlan* FlatExecutionPlan_Deserialize(const char* data, size_t dataLe
     };
     Gears_BufferReader br;
     Gears_BufferReaderInit(&br, &buff);
-    FlatExecutionPlan* ret = FlatExecutionPlan_New();
-
-    bool PDExists = RedisGears_BRReadLong(&br);
-    if(PDExists){
-        ret->PDType = RG_STRDUP(RedisGears_BRReadString(&br));
-        ArgType* type = FepPrivateDatasMgmt_GetArgType(ret->PDType);
-        assert(type);
-        ret->PD = type->deserialize(ret, &br, err);
-        if(!ret->PD){
-            goto error;
-        }
-    }
 
     ret->reader = FlatExecutionPlan_DeserializeReader(&br);
     long numberOfSteps = RedisGears_BRReadLong(&br);
@@ -591,8 +595,36 @@ FlatExecutionPlan* FlatExecutionPlan_Deserialize(const char* data, size_t dataLe
 
     // we need to deserialize the fep now so we will have the deserialize clean version of it.
     // it might changed after to something we can not serialize
-    const char* d = FlatExecutionPlan_Serialize(ret, NULL, NULL);
+    const char* d = FlatExecutionPlan_SerializeInternal(ret, NULL, NULL);
     assert(d);
+    return REDISMODULE_OK;
+
+error:
+    FlatExecutionPlan_Free(ret);
+    return REDISMODULE_ERR;
+}
+
+FlatExecutionPlan* FlatExecutionPlan_Deserialize(Gears_BufferReader* br, char** err){
+    FlatExecutionPlan* ret = FlatExecutionPlan_New();
+
+    bool PDExists = RedisGears_BRReadLong(br);
+    if(PDExists){
+        ret->PDType = RG_STRDUP(RedisGears_BRReadString(br));
+        ArgType* type = FepPrivateDatasMgmt_GetArgType(ret->PDType);
+        assert(type);
+        ret->PD = type->deserialize(ret, br, err);
+        if(!ret->PD){
+            goto error;
+        }
+    }
+
+    size_t len;
+    const char* data = RedisGears_BRReadBuffer(br, &len);
+
+    if(FlatExecutionPlan_DeserializeInternal(ret, data, len, err) != REDISMODULE_OK){
+        goto error;
+    }
+
     return ret;
 
 error:
@@ -613,9 +645,8 @@ static void ExecutionPlan_Distribute(ExecutionPlan* ep){
     Gears_BufferWriter bw;
     Gears_BufferWriterInit(&bw, buff);
     size_t len;
-    const char* serializedFep = FlatExecutionPlan_Serialize(ep->fep, &len, NULL);
-    assert(serializedFep); // if we reached here execution must be serialized
-    RedisGears_BWWriteBuffer(&bw, serializedFep, len);
+    int res = FlatExecutionPlan_Serialize(&bw, ep->fep, NULL);
+    assert(res == REDISMODULE_OK); // if we reached here execution must be serialized
     RedisGears_BWWriteBuffer(&bw, ep->id, ID_LEN); // serialize execution id
     ExecutionStep* readerStep = ep->steps[array_len(ep->steps) - 1];
     readerStep->reader.r->serialize(readerStep->reader.r->ctx, &bw);
@@ -1267,11 +1298,11 @@ static Record* ExecutionPlan_NextRecord(ExecutionPlan* ep, ExecutionStep* step, 
     return r;
 }
 
-static void ExecutionPlan_WriteResult(ExecutionPlan* ep, RedisModuleCtx* rctx, Record* record){
+static void ExecutionPlan_WriteResult(ExecutionPlan* ep, Record* record){
     ep->results = array_append(ep->results, record);
 }
 
-static void ExecutionPlan_WriteError(ExecutionPlan* ep, RedisModuleCtx* rctx, Record* record){
+static void ExecutionPlan_WriteError(ExecutionPlan* ep, Record* record){
     ep->errors = array_append(ep->errors, record);
 }
 
@@ -1284,9 +1315,9 @@ static bool ExecutionPlan_Execute(ExecutionPlan* ep, RedisModuleCtx* rctx){
             return false;
         }
         if(RedisGears_RecordGetType(record) == ERROR_RECORD){
-            ExecutionPlan_WriteError(ep, rctx, record);
+            ExecutionPlan_WriteError(ep, record);
         }else{
-            ExecutionPlan_WriteResult(ep, rctx, record);
+            ExecutionPlan_WriteResult(ep, record);
         }
     }
 
@@ -1331,6 +1362,9 @@ ActionResult EPStatus_DoneAction(ExecutionPlan* ep){
     RedisModuleCtx* rctx = RedisModule_GetThreadSafeContext(NULL);
     LockHandler_Acquire(rctx);
 
+    if(ep->maxIdleTimerSet){
+        RedisModule_StopTimer(rctx, ep->maxIdleTimer, NULL);
+    }
     EPTurnOnFlag(ep, EFDone);
 
     // we set it to true so if execution will be freed during done callbacks we
@@ -1420,7 +1454,30 @@ ActionResult EPStatus_InitiatorTerminationAction(ExecutionPlan* ep){
     return CONTINUE;
 }
 
-static void ExecutionPlan_Main(ExecutionPlan* ep){
+static void ExecutionPlan_OnMaxIdleReacher(RedisModuleCtx *ctx, void *data){
+    // If we reached here we know the execution is not running so its enough
+    // to set its status to abort and call the DoneAction
+    // This will for sure will not break order on local exeuctions
+    // because on local execution we do not consider MaxIdleTime, they just start and
+    // finish without any stops in the middle.
+#define EXECUTION_MAX_IDLE_REACHED_MSG "Execution max idle reached"
+    ExecutionPlan* ep = data;
+    ep->status = ABORTED;
+    Record* err = RG_ErrorRecordCreate(RG_STRDUP(EXECUTION_MAX_IDLE_REACHED_MSG), strlen(EXECUTION_MAX_IDLE_REACHED_MSG));
+    ExecutionPlan_WriteError(ep, err);
+    ep->maxIdleTimerSet = false;
+    EPStatus_DoneAction(ep);
+}
+
+static void ExecutionPlan_Pause(RedisModuleCtx* ctx, ExecutionPlan* ep){
+    LockHandler_Acquire(ctx);
+    ep->isPaused = true;
+    ep->maxIdleTimer = RedisModule_CreateTimer(ctx, ep->fep->executionMaxIdleTime, ExecutionPlan_OnMaxIdleReacher, ep);
+    ep->maxIdleTimerSet = true;
+    LockHandler_Release(ctx);
+}
+
+static void ExecutionPlan_Main(RedisModuleCtx* ctx, ExecutionPlan* ep){
     ActionResult result;
     EPTurnOffFlag(ep, EFSentRunRequest);
     while(true){
@@ -1429,7 +1486,7 @@ static void ExecutionPlan_Main(ExecutionPlan* ep){
         case CONTINUE:
             break;
         case STOP:
-            ep->isPaused = true;
+            ExecutionPlan_Pause(ctx, ep);
             return;
         case COMPLETED:
             return;
@@ -1484,10 +1541,8 @@ static void FlatExecutionPlan_RegisterKeySpaceEvent(RedisModuleCtx *ctx, const c
     };
     Gears_BufferReader br;
     Gears_BufferReaderInit(&br, &buff);
-    size_t dataLen;
-    char* data = RedisGears_BRReadBuffer(&br, &dataLen);
     char* err = NULL;
-    FlatExecutionPlan* fep = FlatExecutionPlan_Deserialize(data, dataLen, &err);
+    FlatExecutionPlan* fep = FlatExecutionPlan_Deserialize(&br, &err);
     if(!fep){
         RedisModule_Log(ctx, "warning", "Could not deserialize flat execution plan sent by another shard : %s, error='%s'", sender_id, err);
         if(err){
@@ -1606,6 +1661,7 @@ static ExecutionPlan* FlatExecutionPlan_CreateExecution(FlatExecutionPlan* fep, 
 
     ep->assignWorker = NULL;
     ep->isPaused = true;
+    ep->maxIdleTimerSet = false;
 
     return ep;
 }
@@ -1694,6 +1750,8 @@ static void ExecutionStep_Reset(ExecutionStep* es){
             Gears_dictReleaseIterator(iter);
             Gears_dictEmpty(es->accumulateByKey.accumulators, NULL);
 
+        }else{
+            es->accumulateByKey.accumulators = Gears_dictCreate(&Gears_dictTypeHeapStrings, NULL);
         }
         break;
     default:
@@ -1840,10 +1898,8 @@ static void ExecutionPlan_OnReceived(RedisModuleCtx *ctx, const char *sender_id,
     };
     Gears_BufferReader br;
     Gears_BufferReaderInit(&br, &buff);
-    size_t dataLen;
-    char* data = RedisGears_BRReadBuffer(&br, &dataLen);
     char* err = NULL;
-    FlatExecutionPlan* fep = FlatExecutionPlan_Deserialize(data, dataLen, &err);
+    FlatExecutionPlan* fep = FlatExecutionPlan_Deserialize(&br, &err);
     if(!fep){
         RedisModule_Log(ctx, "warning", "Could not deserialize flat execution plan for execution, shard : %s, error='%s'", sender_id, err);
         if(err){
@@ -2022,21 +2078,21 @@ static void ExecutionPlan_DoneRepartition(RedisModuleCtx *ctx, const char *sende
 	ExectuionPlan_WorkerMsgSend(ep->assignWorker, msg);
 }
 
-static void ExecutionPlan_ExecutionTerminate(ExecutionPlan* ep){
+static void ExecutionPlan_ExecutionTerminate(RedisModuleCtx* ctx, ExecutionPlan* ep){
     assert(ep->status == WAITING_FOR_INITIATOR_TERMINATION);
-    ExecutionPlan_Main(ep);
+    ExecutionPlan_Main(ctx, ep);
 }
 
-static void ExecutionPlan_ExecutionDone(ExecutionPlan* ep){
+static void ExecutionPlan_ExecutionDone(RedisModuleCtx* ctx, ExecutionPlan* ep){
     ep->totalShardsCompleted++;
     if((Cluster_GetSize() - 1) == ep->totalShardsCompleted){ // no need to wait to myself
-        ExecutionPlan_Main(ep);
+        ExecutionPlan_Main(ctx, ep);
     }else{
-        ep->isPaused = true;
+        ExecutionPlan_Pause(ctx, ep);
     }
 }
 
-static void ExecutionPlan_StepDone(ExecutionPlan* ep, size_t stepId, enum StepType stepType){
+static void ExecutionPlan_StepDone(RedisModuleCtx* ctx, ExecutionPlan* ep, size_t stepId, enum StepType stepType){
 	size_t totalShardsCompleted;
 	switch(stepType){
 	case REPARTITION:
@@ -2053,13 +2109,13 @@ static void ExecutionPlan_StepDone(ExecutionPlan* ep, size_t stepId, enum StepTy
 
 	assert(Cluster_GetSize() - 1 >= totalShardsCompleted);
 	if((Cluster_GetSize() - 1) == totalShardsCompleted){ // no need to wait to myself
-	    ExecutionPlan_Main(ep);
+	    ExecutionPlan_Main(ctx, ep);
 	}else{
-        ep->isPaused = true;
+	    ExecutionPlan_Pause(ctx, ep);
 	}
 }
 
-static void ExecutionPlan_AddStepRecord(ExecutionPlan* ep, size_t stepId, Record* r, enum StepType stepType){
+static void ExecutionPlan_AddStepRecord(RedisModuleCtx* ctx, ExecutionPlan* ep, size_t stepId, Record* r, enum StepType stepType){
 #define MAX_PENDING_TO_START_RUNNING 10000
 	Record*** pendings = NULL;
 	switch(stepType){
@@ -2076,9 +2132,9 @@ static void ExecutionPlan_AddStepRecord(ExecutionPlan* ep, size_t stepId, Record
 	}
 	*pendings = array_append(*pendings, r);
 	if(array_len(*pendings) >= MAX_PENDING_TO_START_RUNNING){
-	    ExecutionPlan_Main(ep);
+	    ExecutionPlan_Main(ctx, ep);
 	}else{
-        ep->isPaused = true;
+	    ExecutionPlan_Pause(ctx, ep);
 	}
 }
 
@@ -2110,6 +2166,10 @@ static void ExecutionPlan_MsgArrive(RedisModuleCtx* ctx, WorkerMsg* msg){
             };
             ep->onStartCallback(&ectx, ep->fep->onExecutionStartStep.arg.stepArg);
         }
+    }else{
+        // here we need to cancle an existing maxIdleTimer
+        RedisModule_StopTimer(ctx, ep->maxIdleTimer, NULL);
+        ep->maxIdleTimerSet = false;
     }
     if(ep->onUnpausedCallback){
         ExecutionCtx ectx = {
@@ -2123,19 +2183,22 @@ static void ExecutionPlan_MsgArrive(RedisModuleCtx* ctx, WorkerMsg* msg){
     LockHandler_Release(ctx);
 	switch(msg->type){
 	case RUN_MSG:
-        ExecutionPlan_Main(ep);
+        ExecutionPlan_Main(ctx, ep);
 		break;
 	case ADD_RECORD_MSG:
-		ExecutionPlan_AddStepRecord(ep, msg->addRecordWM.stepId, msg->addRecordWM.record, msg->addRecordWM.stepType);
+		ExecutionPlan_AddStepRecord(ctx, ep, msg->addRecordWM.stepId, msg->addRecordWM.record, msg->addRecordWM.stepType);
+		// setting it to NULL to indicate that we move responsibility
+		// on the record to the execution and it should not be free on ExectuionPlan_WorkerMsgFree
+		msg->addRecordWM.record = NULL;
 		break;
 	case SHARD_COMPLETED_MSG:
-		ExecutionPlan_StepDone(ep, msg->shardCompletedWM.stepId, msg->shardCompletedWM.stepType);
+		ExecutionPlan_StepDone(ctx, ep, msg->shardCompletedWM.stepId, msg->shardCompletedWM.stepType);
 		break;
 	case EXECUTION_DONE:
-	    ExecutionPlan_ExecutionDone(ep);
+	    ExecutionPlan_ExecutionDone(ctx, ep);
 	    break;
 	case EXECUTION_TERMINATE:
-        ExecutionPlan_ExecutionTerminate(ep);
+        ExecutionPlan_ExecutionTerminate(ctx, ep);
         break;
 	default:
 		assert(false);
@@ -2245,16 +2308,17 @@ int FlatExecutionPlan_Register(FlatExecutionPlan* fep, ExecutionMode mode, void*
 
     assert(callbacks->serializeTriggerArgs);
 
-    size_t len;
-    const char* serializedFep = FlatExecutionPlan_Serialize(fep, &len, err);
-    if(!serializedFep){
-        return 0;
-    }
-
     Gears_Buffer* buff = Gears_BufferCreate();
     Gears_BufferWriter bw;
     Gears_BufferWriterInit(&bw, buff);
-    RedisGears_BWWriteBuffer(&bw, serializedFep, len);
+
+    size_t len;
+    int res = FlatExecutionPlan_Serialize(&bw, fep, err);
+    if(res != REDISMODULE_OK){
+        Gears_BufferFree(buff);
+        return 0;
+    }
+
     callbacks->serializeTriggerArgs(args, &bw);
     RedisGears_BWWriteLong(&bw, mode);
 
@@ -2281,7 +2345,7 @@ int FlatExecutionPlan_Register(FlatExecutionPlan* fep, ExecutionMode mode, void*
 ExecutionPlan* FlatExecutionPlan_Run(FlatExecutionPlan* fep, ExecutionMode mode, void* arg, RedisGears_OnExecutionDoneCallback callback, void* privateData, WorkerData* worker, char** err){
     if(Cluster_IsClusterMode()){
         // on cluster mode, we must make sure we can distribute the execution to all shards.
-        if(!FlatExecutionPlan_Serialize(fep, NULL, err)){
+        if(!FlatExecutionPlan_SerializeInternal(fep, NULL, err)){
             return NULL;
         }
     }
@@ -2552,6 +2616,7 @@ FlatExecutionPlan* FlatExecutionPlan_New(){
     res->desc = NULL;
     res->executionPoolSize = 0;
     res->serializedFep = NULL;
+    res->executionMaxIdleTime = GearsConfig_ExecutionMaxIdleTime();
     res->onExecutionStartStep = (FlatBasicStep){
             .stepName = NULL,
             .arg = {
@@ -3045,15 +3110,20 @@ void ExecutionPlan_Clean() {
     Gears_dictReleaseIterator(iter);
 
     // free all executions
+    ExecutionPlan** epToFree = array_new(ExecutionPlan*, 10);
+
     Gears_dictIterator* it = Gears_dictGetIterator(epData.epDict);
     Gears_dictEntry *entry = NULL;
     while((entry = Gears_dictNext(it))) {
         ExecutionPlan* ep = Gears_dictGetVal(entry);
-        if(EPIsFlagOn(ep, EFDone)){
-            ExecutionPlan_Free(ep);
-        }
-        RedisModule_Log(NULL, "warning", "Found a unfinished exeution on shutdown, valgrind check will probably failed");
+        epToFree = array_append(epToFree, ep);
     }
     Gears_dictReleaseIterator(it);
+
+    for(size_t i = 0 ; i < array_len(epToFree) ; ++i){
+        ExecutionPlan_Free(epToFree[i]);
+    }
+
+    array_free(epToFree);
 }
 

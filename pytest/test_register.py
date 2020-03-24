@@ -494,9 +494,20 @@ def testRegistersReplicatedToSlave():
     except Exception:
         env.assertTrue(False, message='Failed waiting for keys to update')
 
-    executions = env.cmd('RG.DUMPEXECUTIONS')
-    for r in executions:
-         env.expect('RG.DROPEXECUTION', r[1]).equal('OK')
+    ## make sure registrations did not run on slave (if it did NumOfKeys would get to 200)
+    try:
+        with TimeLimit(5):
+            done = False
+            while not done:
+                done = True
+                executions = env.cmd('RG.DUMPEXECUTIONS')
+                for r in executions:
+                    try:
+                        env.cmd('RG.DROPEXECUTION', r[1])
+                    except Exception:
+                        done = False
+    except Exception:
+        env.assertTrue(False, message='Failed dropping all the executions')
 
     registrations = env.cmd('RG.DUMPREGISTRATIONS')
     for r in registrations:
@@ -895,3 +906,11 @@ def testCommandReaderCluster(env):
     conn = getConnectionByEnv(env)
     env.expect('RG.PYEXECUTE', "GB('CommandReader').count().register(trigger='GetNumShard')").ok()
     env.expect('RG.TRIGGER', 'GetNumShard').equal([str(env.shardsCount)])
+
+def testCommandReaderWithCountBy(env):
+    env.skipOnCluster()
+    env.expect('RG.PYEXECUTE', "GB('CommandReader').flatmap(lambda x: x[1:]).countby(lambda x: x).register(trigger='test1')").ok()
+    env.expect('RG.TRIGGER', 'test1', 'a', 'a', 'a').equal(["{'key': 'a', 'value': 3}"])
+
+    # we need to check twice to make sure the execution reset are not causing issues
+    env.expect('RG.TRIGGER', 'test1', 'a', 'a', 'a').equal(["{'key': 'a', 'value': 3}"])
