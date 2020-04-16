@@ -40,6 +40,7 @@ def standalone(image):
 @pytest.mark.parametrize(
     'snippet,expected',
     [
+        ('docs/snippets/examples/automatic-expire.py', b'OK'),
         ('docs/snippets/examples/del-by-prefix.py', [[], []]),
         ('docs/snippets/examples/monte-carlo-pi.py', [[b'foo'], []]),
         ('docs/snippets/examples/stream-logger.py', b'OK'),
@@ -84,7 +85,8 @@ def standalone(image):
         ('docs/snippets/operations/sort.py', [[], []]),
         ('docs/snippets/readers/keysreader-register.py', b'OK'),
         ('docs/snippets/readers/keysreader-run.py', [[], []]),
-        ('docs/snippets/readers/pythonreader-run.py', [range(6379), []]),
+        ('docs/snippets/readers/pythonreader-run-001.py', [range(6379), []]),
+        ('docs/snippets/readers/pythonreader-run-002.py', [range(42), []]),
         ('docs/snippets/readers/shardidreader-run.py', [[1], []]),
         ('docs/snippets/readers/streamreader-register.py', b'OK'),
         ('docs/snippets/readers/streamreader-run.py', [[], []]),
